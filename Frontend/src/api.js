@@ -1,36 +1,89 @@
 import axios from 'axios';
+import { clearAccessToken, getAccessToken, setAccessToken } from './auth';
+
+const baseURL = 'http://localhost:5000';
 
 const api = axios.create({
-    baseURL: 'http://localhost:5000'
+  baseURL,
+  withCredentials: true,
 });
 
-// The Secret Helper (Interceptor)
+const authClient = axios.create({
+  baseURL,
+  withCredentials: true,
+});
+
+let refreshPromise = null;
+
+export async function refreshAccessToken() {
+  if (!refreshPromise) {
+    refreshPromise = authClient
+      .post('/auth/refresh')
+      .then((response) => {
+        const nextAccessToken = response.data.accessToken;
+        setAccessToken(nextAccessToken);
+        return nextAccessToken;
+      })
+      .catch((error) => {
+        clearAccessToken();
+        throw error;
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+
+  return refreshPromise;
+}
+
+api.interceptors.request.use((config) => {
+  const token = getAccessToken();
+
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
+  return config;
+});
+
 api.interceptors.response.use(
-    (response) => response, // If everything is okay, just keep going
-    async (error) => {
-        const originalRequest = error.config;
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    const requestPath = originalRequest?.url || '';
+    const shouldSkipRefresh =
+      requestPath.includes('/auth/login') || requestPath.includes('/auth/refresh');
 
-        // If the error is 401 (Expired Wristband) and we haven't tried fixing it yet
-        if (error.response.status === 401 && !originalRequest._retry) {
-            originalRequest._retry = true;
-            const refreshToken = localStorage.getItem('refreshToken');
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !shouldSkipRefresh
+    ) {
+      originalRequest._retry = true;
 
-            try {
-                // Try to get a new Wristband using the VIP Card [cite: 88]
-                const res = await axios.post('http://localhost:5000/auth/refresh', { refreshToken });
-                const { accessToken } = res.data;
-
-                // Update the broken request with the new Wristband and try again
-                api.defaults.headers.common['Authorization'] = `Bearer ${accessToken}`;
-                return api(originalRequest);
-            } catch (refreshError) {
-                // If the VIP Card is also expired, kick them out to login [cite: 92]
-                window.location.href = '/login?message=session_expired';
-                return Promise.reject(refreshError);
-            }
+      try {
+        const nextAccessToken = await refreshAccessToken();
+        originalRequest.headers.Authorization = `Bearer ${nextAccessToken}`;
+        return api(originalRequest);
+      } catch (refreshError) {
+        clearAccessToken();
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
         }
-        return Promise.reject(error);
+        return Promise.reject(refreshError);
+      }
     }
+
+    if (error.response?.status === 401 && requestPath.includes('/auth/refresh')) {
+      clearAccessToken();
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
+
+    return Promise.reject(error);
+  }
 );
 
 export default api;

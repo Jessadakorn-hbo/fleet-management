@@ -1,0 +1,655 @@
+# Fleet Management Backend API
+
+Base URL: `http://localhost:5000`
+
+Backend นี้เป็น Express API สำหรับระบบจัดการรถ, งานขนส่ง, checkpoint, dashboard, alerts และ auth
+
+## Auth Model
+
+Protected routes ใช้ header:
+
+```http
+Authorization: Bearer <accessToken>
+```
+
+สิทธิ์ถูกตรวจใน middleware `protect()`:
+- `ADMIN` ผ่านได้ทุก route ที่ใช้ `protect(...)`
+- `DRIVER` ใช้ route ปฏิบัติการเดินรถและ route อ่านข้อมูลตามที่ระบุ
+
+Refresh token ถูกเก็บใน cookie ชื่อ `refreshToken` ที่ path `/auth`
+
+## Error Format
+
+ทุก error หลักจะอยู่ในรูปแบบนี้:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human readable message"
+  }
+}
+```
+
+ตัวอย่าง error code ที่เจอบ่อย:
+- `UNAUTHORIZED`
+- `FORBIDDEN`
+- `VALIDATION_ERROR`
+- `AUTH_FAILED`
+- `REFRESH_REQUIRED`
+- `REFRESH_INVALID`
+- `TOKEN_EXPIRED`
+- `DB_ERR`
+- `NOT_FOUND`
+- `BUSY`
+- `SEQ_ERR`
+- `INVALID_TRANSITION`
+
+## Environment
+
+ตัวแปรหลักจาก `.env.example`
+
+```env
+DATABASE_URL=mysql://root:@localhost:3306/testboom
+FRONTEND_ORIGIN=http://localhost:3000
+ACCESS_SECRET=my_super_secret_access_key
+REFRESH_SECRET=my_super_secret_refresh_key
+PORT=5000
+```
+
+## Route Summary
+
+| Method | Path | Auth | Role |
+|---|---|---|---|
+| GET | `/` | No | Public |
+| POST | `/auth/register` | No | Public |
+| POST | `/auth/login` | No | Public |
+| POST | `/auth/refresh` | No | Public |
+| POST | `/auth/logout` | No | Public |
+| GET | `/vehicles` | Yes | `DRIVER`, `ADMIN` |
+| GET | `/vehicles/:id` | Yes | `DRIVER`, `ADMIN` |
+| POST | `/vehicles` | Yes | `ADMIN` |
+| PATCH | `/vehicles/:id/status` | Yes | `ADMIN` |
+| GET | `/trips` | Yes | `DRIVER`, `ADMIN` |
+| GET | `/trips/:id` | Yes | `DRIVER`, `ADMIN` |
+| POST | `/trips` | Yes | `DRIVER` |
+| PATCH | `/trips/:id/status` | Yes | `DRIVER` |
+| GET | `/trips/:id/checkpoints` | Yes | `DRIVER`, `ADMIN` |
+| POST | `/trips/:id/checkpoints` | Yes | `DRIVER` |
+| PATCH | `/trips/checkpoints/:id/status` | Yes | `DRIVER` |
+| PATCH | `/checkpoints/:id/status` | Yes | `DRIVER` |
+| GET | `/alerts` | Yes | `DRIVER`, `ADMIN` |
+| GET | `/dashboard/metrics` | Yes | `DRIVER`, `ADMIN` |
+| GET | `/audit-logs` | Yes | `DRIVER`, `ADMIN` |
+| GET | `/health/db` | No | Public |
+
+## API Details
+
+### 1. Health
+
+#### `GET /`
+
+ใช้เช็กว่า server ทำงานอยู่
+
+Response:
+
+```text
+Fleet Management API is Running! Go to localhost:3000 for the Frontend.
+```
+
+#### `GET /health/db`
+
+ใช้เช็กว่า backend ต่อฐานข้อมูลได้
+
+Success:
+
+```json
+{
+  "ok": true
+}
+```
+
+## 2. Authentication
+
+### `POST /auth/register`
+
+สร้าง user ใหม่ผ่าน API
+
+Body:
+
+```json
+{
+  "username": "driver",
+  "email": "driver@example.com",
+  "password": "driver123",
+  "name": "Test Driver",
+  "phone": "0833333333",
+  "role": "DRIVER",
+  "status": "ACTIVE"
+}
+```
+
+หมายเหตุ:
+- ต้องมี password column ใน table `users`
+- ถ้า schema ไม่มี `username` route นี้ยังใช้ `email` เป็น identifier ได้
+- ถ้าไม่ส่ง `role` จะ default เป็น `DRIVER`
+- ถ้าไม่ส่ง `status` จะ default เป็น `ACTIVE`
+
+Success:
+
+```json
+{
+  "message": "User registered",
+  "user": {
+    "id": "usr_xxx",
+    "username": "driver",
+    "name": "Test Driver",
+    "email": "driver@example.com",
+    "role": "DRIVER"
+  }
+}
+```
+
+### `POST /auth/login`
+
+ใช้ sign in
+
+Body:
+
+```json
+{
+  "identifier": "driver",
+  "password": "driver123"
+}
+```
+
+รองรับ identifier จากคอลัมน์ที่มีจริงใน table `users` ตามลำดับนี้:
+- `username`
+- `email`
+- `id`
+- `name`
+
+Success:
+
+```json
+{
+  "accessToken": "<jwt>",
+  "refreshToken": "<jwt>",
+  "expiresIn": 900,
+  "user": {
+    "id": "driver_001",
+    "username": "driver",
+    "name": "Test Driver",
+    "email": "driver@example.com",
+    "role": "DRIVER"
+  }
+}
+```
+
+### `POST /auth/refresh`
+
+ขอ access token ใหม่จาก refresh token
+
+รองรับ 2 แบบ:
+- ส่ง refresh token มากับ cookie
+- ส่งใน body
+
+ตัวอย่าง body:
+
+```json
+{
+  "refreshToken": "<refreshToken>"
+}
+```
+
+### `POST /auth/logout`
+
+ล้าง refresh token cookie
+
+Success status: `204 No Content`
+
+## 3. Vehicles
+
+### `GET /vehicles`
+
+ดึงรถทั้งหมด
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+Success:
+
+```json
+[
+  {
+    "id": "veh_001",
+    "license_plate": "1กข1234",
+    "type": "TRUCK",
+    "status": "ACTIVE"
+  }
+]
+```
+
+### `GET /vehicles/:id`
+
+ดึงข้อมูลรถรายคัน
+
+Success error ถ้าไม่เจอ:
+
+```json
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Vehicle not found"
+  }
+}
+```
+
+### `POST /vehicles`
+
+สร้างรถใหม่
+
+Auth:
+- `ADMIN`
+
+Body:
+
+```json
+{
+  "id": "veh_001",
+  "license_plate": "1กข1234",
+  "type": "TRUCK",
+  "driver_id": "driver_001",
+  "context": {
+    "status": "IDLE",
+    "brand": "Isuzu",
+    "model": "GIGA",
+    "year": 2022,
+    "fuel_type": "DIESEL",
+    "mileage_km": 12000,
+    "last_service_km": 8000,
+    "next_service_km": 10000
+  }
+}
+```
+
+หมายเหตุ:
+- `driver_id` ต้องอ้างถึง `users.id` ที่มีอยู่จริง ไม่งั้นจะติด foreign key
+
+Success:
+
+```json
+{
+  "message": "Vehicle added"
+}
+```
+
+### `PATCH /vehicles/:id/status`
+
+เปลี่ยนสถานะรถ
+
+Auth:
+- `ADMIN`
+
+Body:
+
+```json
+{
+  "status": "ACTIVE"
+}
+```
+
+Allowed transitions:
+- `IDLE -> ACTIVE`
+- `ACTIVE -> MAINTENANCE`
+- `ACTIVE -> IDLE`
+- `MAINTENANCE -> IDLE`
+- `RETIRED ->` ไม่มี transition ต่อ
+
+ถ้าข้ามลำดับจะได้:
+
+```json
+{
+  "error": {
+    "code": "INVALID_TRANSITION",
+    "message": "Vehicle cannot move from IDLE to MAINTENANCE",
+    "allowed": ["ACTIVE"]
+  }
+}
+```
+
+## 4. Trips
+
+### `GET /trips`
+
+ดึงรายการ trip
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+Query ที่รองรับ:
+- `status`
+- `vehicle_id`
+
+พฤติกรรม:
+- ถ้าเป็น `DRIVER` จะเห็นเฉพาะ trip ของ `driver_id = req.user.id`
+- ถ้าเป็น `ADMIN` จะเห็นทั้งหมด
+
+ตัวอย่าง:
+
+```http
+GET /trips?status=IN_PROGRESS
+```
+
+### `GET /trips/:id`
+
+ดึง trip รายตัว
+
+พฤติกรรม:
+- ถ้าเป็น `DRIVER` และ trip ไม่ใช่ของตัวเอง จะได้ `403 FORBIDDEN`
+
+### `POST /trips`
+
+สร้าง trip ใหม่
+
+Auth:
+- `DRIVER`
+
+Body:
+
+```json
+{
+  "id": "trip_001",
+  "vehicle_id": "veh_001",
+  "driver_id": "driver_001",
+  "origin": "Bangkok",
+  "destination": "Chiang Mai",
+  "distance_km": 680,
+  "cargo_type": "GENERAL",
+  "cargo_weight_kg": 1200,
+  "parent_trip_id": null
+}
+```
+
+หมายเหตุ:
+- `id`, `vehicle_id`, `driver_id` จำเป็น
+- route นี้จะเช็กว่ามี trip `IN_PROGRESS` ของรถคันเดียวกันอยู่แล้วหรือไม่
+- ถ้ามีอยู่แล้วจะได้ `BUSY`
+
+Success:
+
+```json
+{
+  "message": "Trip started"
+}
+```
+
+### `PATCH /trips/:id/status`
+
+เปลี่ยนสถานะ trip
+
+Auth:
+- `DRIVER`
+
+Body:
+
+```json
+{
+  "status": "COMPLETED"
+}
+```
+
+Allowed status:
+- `SCHEDULED`
+- `IN_PROGRESS`
+- `COMPLETED`
+- `CANCELLED`
+
+ถ้าส่ง `COMPLETED` ระบบจะ set `ended_at = NOW()`
+
+### `GET /trips/:id/checkpoints`
+
+ดึง checkpoint ของ trip ตาม `sequence ASC`
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+### `POST /trips/:id/checkpoints`
+
+เพิ่ม checkpoint ให้ trip
+
+Auth:
+- `DRIVER`
+
+Body:
+
+```json
+{
+  "id": "cp_001",
+  "sequence": 1,
+  "status": "PENDING",
+  "location_name": "Ayutthaya",
+  "latitude": 14.3532,
+  "longitude": 100.5689,
+  "purpose": "REST",
+  "notes": "First stop"
+}
+```
+
+Required:
+- `id`
+- `sequence`
+- `location_name`
+- `purpose`
+
+Success:
+
+```json
+{
+  "message": "Checkpoint created"
+}
+```
+
+## 5. Checkpoints
+
+### `PATCH /checkpoints/:id/status`
+
+### `PATCH /trips/checkpoints/:id/status`
+
+สองเส้นนี้ทำงานเหมือนกัน ใช้ logic เดียวกัน
+
+Auth:
+- `DRIVER`
+
+Body:
+
+```json
+{
+  "status": "ARRIVED"
+}
+```
+
+Allowed status:
+- `PENDING`
+- `ARRIVED`
+- `DEPARTED`
+- `SKIPPED`
+
+กฎสำคัญ:
+- ถ้า checkpoint มี `sequence > 1` ระบบจะตรวจว่า checkpoint ก่อนหน้าต้องเป็น `DEPARTED` ก่อน
+- ถ้า status เป็น `ARRIVED` ระบบจะ set `arrived_at = NOW()`
+
+ถ้าผิดลำดับจะได้:
+
+```json
+{
+  "error": {
+    "code": "SEQ_ERR",
+    "message": "Previous stop not finished"
+  }
+}
+```
+
+## 6. Dashboard
+
+### `GET /dashboard/metrics`
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+Response:
+
+```json
+{
+  "totalVehicles": 1,
+  "activeTrips": 1,
+  "maintenanceOverdue": 0
+}
+```
+
+หมายเหตุ:
+- route นี้รองรับทั้ง table `maintenances` และ `maintenance`
+
+## 7. Alerts
+
+### `GET /alerts`
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+ระบบจะรวม alert จาก 3 rule:
+- รถที่ `mileage_km >= next_service_km`
+- คนขับที่ license ใกล้หมดอายุ ถ้ามีคอลัมน์ `license_expiry`
+- งาน maintenance ที่ overdue
+
+Query ที่รองรับ:
+- `severity`
+- `resource_type`
+
+ตัวอย่าง:
+
+```http
+GET /alerts?severity=CRITICAL
+GET /alerts?resource_type=VEHICLE
+```
+
+Response:
+
+```json
+[
+  {
+    "resource_id": "veh_001",
+    "resource_type": "VEHICLE",
+    "message": "Vehicle 1กข1234 is due for service",
+    "severity": "CRITICAL"
+  }
+]
+```
+
+## 8. Audit Logs
+
+### `GET /audit-logs`
+
+Auth:
+- `DRIVER`
+- `ADMIN`
+
+พฤติกรรม:
+- `ADMIN` เห็นทั้งหมด
+- `DRIVER` เห็นเฉพาะ log ของตัวเอง
+- ถ้ายังไม่มี table `audit_logs` route นี้จะคืน `[]`
+
+## Recommended Test Flow
+
+1. `GET /health/db`
+2. `POST /auth/register`
+3. `POST /auth/login`
+4. `POST /vehicles` ด้วย `ADMIN`
+5. `GET /vehicles`
+6. `PATCH /vehicles/:id/status`
+7. `POST /trips` ด้วย `DRIVER`
+8. `GET /trips`
+9. `POST /trips/:id/checkpoints`
+10. `PATCH /checkpoints/:id/status`
+11. `GET /dashboard/metrics`
+12. `GET /alerts`
+13. `GET /audit-logs`
+
+## cURL Examples
+
+### Login
+
+```bash
+curl -i -c cookie.txt -X POST http://localhost:5000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"admin","password":"admin123"}'
+```
+
+### Create Vehicle
+
+```bash
+curl -i -X POST http://localhost:5000/vehicles \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"veh_001",
+    "license_plate":"1กข1234",
+    "type":"TRUCK",
+    "driver_id":"driver_001",
+    "context":{
+      "brand":"Isuzu",
+      "model":"GIGA",
+      "year":2022,
+      "fuel_type":"DIESEL",
+      "mileage_km":12000,
+      "last_service_km":8000,
+      "next_service_km":10000
+    }
+  }'
+```
+
+### Create Trip
+
+```bash
+curl -i -X POST http://localhost:5000/trips \
+  -H "Authorization: Bearer <DRIVER_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"trip_001",
+    "vehicle_id":"veh_001",
+    "driver_id":"driver_001",
+    "origin":"Bangkok",
+    "destination":"Chiang Mai",
+    "distance_km":680,
+    "cargo_type":"GENERAL",
+    "cargo_weight_kg":1200
+  }'
+```
+
+### Create Checkpoint
+
+```bash
+curl -i -X POST http://localhost:5000/trips/trip_001/checkpoints \
+  -H "Authorization: Bearer <DRIVER_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"cp_001",
+    "sequence":1,
+    "location_name":"Ayutthaya",
+    "purpose":"REST"
+  }'
+```
+
+### Update Checkpoint
+
+```bash
+curl -i -X PATCH http://localhost:5000/checkpoints/cp_001/status \
+  -H "Authorization: Bearer <DRIVER_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"ARRIVED"}'
+```

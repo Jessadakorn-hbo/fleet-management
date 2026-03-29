@@ -25,10 +25,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      DB_HOST: db # Points to the 'db' service above
-      DB_USER: root
-      DB_PASS: hbogogo1145
-      DB_NAME: fleet_db
+      DATABASE_URL: mysql://root:hbogogo1145@db:3306/fleet_db
       ACCESS_SECRET: my_super_secret_access_key
       REFRESH_SECRET: my_super_secret_refresh_key
     depends_on:
